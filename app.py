@@ -93,4 +93,7 @@ def make_documents(text: str) -> List[Document]:
     return [
         Document(
             page_content=chunk,
-            metadata={"source": "InnovateCorp KT Guide"},
+            metadata={"source": "InnovateCorp KT Guide"}
+        )
+        for chunk in chunks
+    ]
