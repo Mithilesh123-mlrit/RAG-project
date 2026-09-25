@@ -182,52 +182,44 @@ def get_llm():
 # ============================================================
 
 def generate_answer(question):
-    """
-    Retrieve relevant context and ask Gemini.
-    """
-
-    context_chunks = retrieve_context(
-        question,
-        top_k=3
-    )
-
-    if not context_chunks:
-
-        return (
-            "I couldn't find relevant information "
-            "in the provided knowledge base."
-        )
-
-    context = "\n\n".join(context_chunks)
+    context = retrieve_context(question)
 
     prompt = f"""
-You are a helpful assistant.
+Answer the user's question using the knowledge base below.
 
-Answer the user's question using ONLY the
-information contained in the CONTEXT below.
-
-If the answer is not contained in the context,
-say that the information is not available
-in the knowledge base.
-
-Do not invent facts.
-
-Keep the answer concise and clear.
-
-CONTEXT:
+Knowledge base:
 {context}
 
-USER QUESTION:
+User question:
 {question}
 
-ANSWER:
+Give a clear and concise answer.
 """
 
     llm = get_llm()
-
     response = llm.invoke(prompt)
 
-    return response.content
+    # Extract plain text from Gemini/LangChain response
+    if hasattr(response, "text"):
+        return response.text
+
+    if hasattr(response, "content"):
+        content = response.content
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            return "".join(
+                item.get("text", str(item))
+                if isinstance(item, dict)
+                else str(item)
+                for item in content
+            )
+
+        return str(content)
+
+    return str(response)
 
 
 # ============================================================
