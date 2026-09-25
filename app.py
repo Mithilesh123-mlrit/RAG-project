@@ -20,11 +20,12 @@ app.config["JSON_SORT_KEYS"] = False
 # Gemini configuration
 # ============================================================
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY environment variable is not set")
-
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is not set"
+    )
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
@@ -167,16 +168,10 @@ def retrieve_context(question, top_k=3):
 
 @lru_cache(maxsize=1)
 def get_llm():
-    """
-    Create Gemini only once.
-
-    @lru_cache means subsequent requests reuse
-    the same model object.
-    """
 
     return ChatGoogleGenerativeAI(
         model=GEMINI_MODEL,
-        google_api_key=GOOGLE_API_KEY,
+        google_api_key=GEMINI_API_KEY,
         temperature=0,
         max_output_tokens=512,
     )
