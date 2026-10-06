@@ -1,443 +1,496 @@
 import os
 import re
-from functools import lru_cache
 
-from flask import Flask, request, jsonify, render_template
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-
-# ============================================================
-# Flask
-# ============================================================
+from flask import Flask, render_template_string, request
+import urllib.request
+import urllib.error
+import json
 
 app = Flask(__name__)
 
-# Keep Flask lightweight
-app.config["JSON_SORT_KEYS"] = False
-
-
 # ============================================================
-# Gemini configuration
+# CONFIG
 # ============================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY environment variable is not set"
-    )
+if not API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set in Render.")
 
-GEMINI_MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.8-flash"
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+
+API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/"
+    f"models/{MODEL}:generateContent"
 )
 
-
 # ============================================================
-# YOUR KNOWLEDGE BASE
-# Replace this text with your actual knowledge base.
-# Keep chunks reasonably small.
+# KNOWLEDGE BASE
 # ============================================================
 
 KNOWLEDGE_BASE = """
-Your knowledge base goes here.
+Welcome to InnovateCorp! This Knowledge Transfer (KT) guide is designed to
+help new employees navigate their initial weeks and understand key aspects
+of our operations. Our core values are Innovation, Collaboration, and
+Customer Focus.
 
-Example:
+Team Structure:
+You will be joining the 'Project Alpha' team, reporting to Sarah Chen,
+the Senior Project Manager.
 
-Our company provides software development services.
-We build web applications, mobile applications,
-AI applications and RAG systems.
+Your direct teammates include:
+David Lee (Lead Developer),
+Maria Rodriguez (UI/UX Designer),
+and Tom Jackson (QA Engineer).
 
-Our working hours are Monday to Friday,
-9:00 AM to 6:00 PM.
+Team meetings are held every Monday at 10 AM in Conference Room 3,
+and daily stand-ups are at 9:30 AM via Google Meet.
 
-For technical support, customers can contact
-the support team through the official support email.
+Key Tools & Software:
+For project management, we use Jira for task tracking and Confluence
+for documentation.
 
-Replace this entire section with your actual content.
-"""
+Our primary communication tool is Slack for instant messaging and
+Google Workspace for email and calendars.
+
+Development work is primarily done using Python and JavaScript,
+with code hosted on GitHub.
+
+Access to these tools will be granted within your first three days.
+
+Onboarding Process:
+Your first week will focus on setup and introductions.
+
+You'll receive your laptop and login credentials on day one.
+
+HR will conduct an orientation session on Tuesday covering company
+policies, benefits, and payroll.
+
+You'll have one-on-one meetings with your team members throughout the week.
+
+By the end of your second week, you should have access to all necessary
+systems and have completed mandatory compliance training modules.
+
+Important Resources:
+The company's internal knowledge base can be found at
+internal.innovatecorp.com/kb.
+
+This includes FAQs, best practices, and troubleshooting guides.
+
+For IT support, submit a ticket via support.innovatecorp.com
+or call extension 5555.
+
+Health and wellness benefits information is available on the HR portal.
+
+Culture & Expectations:
+InnovateCorp encourages a proactive and collaborative environment.
+
+We value open communication and continuous learning.
+
+Don't hesitate to ask questions; your team is here to support your growth.
+
+Performance reviews are conducted quarterly, and professional development
+courses are available through the 'InnovateLearn' platform.
+""".strip()
 
 
 # ============================================================
-# Lightweight text chunking
+# SIMPLE LOCAL RAG RETRIEVAL
 # ============================================================
 
-def create_chunks(text, max_words=180):
-    """
-    Split the knowledge base into small chunks.
+def make_chunks(text):
+    paragraphs = [
+        p.strip()
+        for p in text.split("\n\n")
+        if p.strip()
+    ]
 
-    No embeddings.
-    No vector database.
-    No heavy ML model.
-    """
-
-    words = text.split()
-
-    chunks = []
-
-    for i in range(0, len(words), max_words):
-        chunk = " ".join(words[i:i + max_words]).strip()
-
-        if chunk:
-            chunks.append(chunk)
-
-    return chunks
+    return paragraphs
 
 
-CHUNKS = create_chunks(KNOWLEDGE_BASE)
+CHUNKS = make_chunks(KNOWLEDGE_BASE)
 
-
-# ============================================================
-# Very lightweight tokenizer
-# ============================================================
 
 def tokenize(text):
-    """
-    Convert text into simple lowercase keywords.
-    """
-
     return set(
         re.findall(
-            r"\b[a-zA-Z0-9]{2,}\b",
+            r"[a-zA-Z0-9]+",
             text.lower()
         )
     )
 
 
-# Pre-tokenize chunks once.
-# This happens only when the application starts.
 CHUNK_TOKENS = [
     tokenize(chunk)
     for chunk in CHUNKS
 ]
 
 
-# ============================================================
-# Lightweight RAG retrieval
-# ============================================================
-
-def retrieve_context(question, top_k=3):
-    """
-    Lightweight retrieval using keyword overlap.
-
-    This uses almost no RAM compared with an embedding model
-    and vector database.
-    """
-
+def retrieve(question, top_k=3):
     question_tokens = tokenize(question)
 
-    if not question_tokens:
-        return []
+    scored = []
 
-    scored_chunks = []
-
-    for index, chunk_tokens in enumerate(CHUNK_TOKENS):
-
+    for chunk, chunk_tokens in zip(CHUNKS, CHUNK_TOKENS):
         overlap = question_tokens.intersection(chunk_tokens)
 
-        if not overlap:
-            continue
+        score = len(overlap)
 
-        # Simple relevance score
-        score = len(overlap) / max(len(question_tokens), 1)
+        # Give extra weight to important exact phrases.
+        question_lower = question.lower()
+        chunk_lower = chunk.lower()
 
-        scored_chunks.append(
-            (score, index)
-        )
+        if "project alpha" in question_lower and "project alpha" in chunk_lower:
+            score += 20
 
-    # Highest score first
-    scored_chunks.sort(
+        if "report" in question_lower and "reporting to" in chunk_lower:
+            score += 10
+
+        if "who" in question_lower and "sarah chen" in chunk_lower:
+            score += 5
+
+        scored.append((score, chunk))
+
+    scored.sort(
         key=lambda x: x[0],
         reverse=True
     )
 
-    selected = []
-
-    for score, index in scored_chunks[:top_k]:
-
-        # Ignore extremely weak matches
-        if score >= 0.05:
-            selected.append(CHUNKS[index])
-
-    return selected
+    return [
+        chunk
+        for score, chunk in scored[:top_k]
+        if score > 0
+    ]
 
 
 # ============================================================
-# Gemini model
+# GEMINI
 # ============================================================
 
-@lru_cache(maxsize=1)
-def get_llm():
-
-    return ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0,
-        max_output_tokens=512,
-    )
-
-
-# ============================================================
-# RAG answer
-# ============================================================
-
-def generate_answer(question):
-    context = retrieve_context(question)
-
+def ask_gemini(question, context):
     prompt = f"""
-Answer the user's question using the knowledge base below.
+You are the InnovateCorp Knowledge Transfer assistant.
 
-Knowledge base:
+Answer the user's question using ONLY the provided knowledge-base context.
+
+Do not invent information.
+
+If the answer is present in the context, answer directly and clearly.
+
+If the information is not present, say:
+
+"The information is not available in the InnovateCorp KT guide."
+
+Knowledge-base context:
+
 {context}
 
 User question:
+
 {question}
 
-Give a clear and concise answer.
-"""
+Answer:
+""".strip()
 
-    llm = get_llm()
-    response = llm.invoke(prompt)
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
 
-    # Extract plain text from Gemini/LangChain response
-    if hasattr(response, "text"):
-        return response.text
+    body = json.dumps(payload).encode("utf-8")
 
-    if hasattr(response, "content"):
-        content = response.content
-
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            return "".join(
-                item.get("text", str(item))
-                if isinstance(item, dict)
-                else str(item)
-                for item in content
-            )
-
-        return str(content)
-
-    return str(response)
-
-
-# ============================================================
-# Health check
-# ============================================================
-
-@app.get("/health")
-def health():
-
-    return jsonify({
-        "status": "ok",
-        "chunks": len(CHUNKS),
-        "model": GEMINI_MODEL
-    })
-
-
-# ============================================================
-# Main RAG API
-# ============================================================
-
-@app.post("/ask")
-def ask():
+    request = urllib.request.Request(
+        API_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": API_KEY,
+        },
+        method="POST",
+    )
 
     try:
+        with urllib.request.urlopen(
+            request,
+            timeout=60
+        ) as response:
 
-        data = request.get_json(
-            silent=True
-        ) or {}
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
 
-        question = str(
-            data.get("question", "")
+    except urllib.error.HTTPError as error:
+        details = error.read().decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        raise RuntimeError(
+            f"Gemini API error {error.code}: {details[:1000]}"
+        )
+
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"Unable to connect to Gemini: {error.reason}"
+        )
+
+    candidates = result.get("candidates", [])
+
+    if not candidates:
+        raise RuntimeError(
+            "Gemini returned no answer."
+        )
+
+    parts = candidates[0].get(
+        "content",
+        {}
+    ).get(
+        "parts",
+        []
+    )
+
+    answer = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict)
+    ).strip()
+
+    if not answer:
+        raise RuntimeError(
+            "Gemini returned an empty answer."
+        )
+
+    return answer
+
+
+# ============================================================
+# HTML
+# ============================================================
+
+PAGE = """
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>RAG Assistant</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    max-width: 1000px;
+    margin: 40px auto;
+    padding: 0 20px;
+}
+
+h1 {
+    font-size: 40px;
+}
+
+textarea {
+    width: 100%;
+    min-height: 120px;
+    padding: 12px;
+    font-size: 18px;
+    box-sizing: border-box;
+}
+
+button {
+    margin-top: 15px;
+    padding: 12px 25px;
+    font-size: 17px;
+    cursor: pointer;
+}
+
+.result {
+    margin-top: 25px;
+    padding: 20px;
+    border-radius: 10px;
+    background: #f4f4f4;
+}
+
+.error {
+    margin-top: 25px;
+    padding: 20px;
+    background: #ffe5e5;
+    color: #b00000;
+}
+
+.context {
+    margin-top: 25px;
+    padding: 20px;
+    background: #f8f8f8;
+}
+
+pre {
+    white-space: pre-wrap;
+    font-family: Arial, sans-serif;
+    line-height: 1.5;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>RAG Assistant</h1>
+
+<form method="POST">
+
+<textarea
+    name="question"
+    placeholder="Ask a question about the InnovateCorp KT guide..."
+>{{ question }}</textarea>
+
+<br>
+
+<button type="submit">
+Ask
+</button>
+
+</form>
+
+{% if error %}
+
+<div class="error">
+
+<strong>Error:</strong>
+
+<pre>{{ error }}</pre>
+
+</div>
+
+{% endif %}
+
+
+{% if answer %}
+
+<div class="result">
+
+<h2>Answer</h2>
+
+<pre>{{ answer }}</pre>
+
+</div>
+
+
+<div class="context">
+
+<h2>Retrieved Context</h2>
+
+{% for chunk in chunks %}
+
+<pre>{{ chunk }}</pre>
+
+<hr>
+
+{% endfor %}
+
+</div>
+
+{% endif %}
+
+</body>
+
+</html>
+"""
+
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.route("/", methods=["GET", "POST"])
+def home():
+
+    question = ""
+    answer = None
+    chunks = []
+    error = None
+
+    if request.method == "POST":
+
+        question = request.form.get(
+            "question",
+            ""
         ).strip()
 
         if not question:
 
-            return jsonify({
-                "error": "Question is required"
-            }), 400
+            error = "Please enter a question."
 
-        # Prevent unnecessarily huge requests
-        if len(question) > 2000:
+        else:
 
-            return jsonify({
-                "error": "Question is too long"
-            }), 400
+            try:
 
-        answer = generate_answer(question)
+                chunks = retrieve(question)
 
-        return jsonify({
-            "answer": answer
-        })
+                if not chunks:
 
-    except Exception as exc:
+                    answer = (
+                        "The information is not available "
+                        "in the InnovateCorp KT guide."
+                    )
 
-        app.logger.exception(
-            "RAG request failed"
-        )
+                else:
 
-        return jsonify({
-            "error": "Internal server error",
-            "details": str(exc)
-        }), 500
+                    context = "\n\n".join(
+                        chunks
+                    )
 
+                    answer = ask_gemini(
+                        question,
+                        context
+                    )
 
-# ============================================================
-# Optional browser UI
-# ============================================================
+            except Exception as exc:
 
-@app.get("/")
-def home():
+                error = str(exc)
 
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>RAG Assistant</title>
-
-        <meta name="viewport"
-              content="width=device-width, initial-scale=1">
-
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 800px;
-                margin: 40px auto;
-                padding: 20px;
-            }
-
-            textarea {
-                width: 100%;
-                height: 100px;
-                padding: 12px;
-                font-size: 16px;
-                box-sizing: border-box;
-            }
-
-            button {
-                margin-top: 10px;
-                padding: 12px 20px;
-                cursor: pointer;
-            }
-
-            #answer {
-                margin-top: 25px;
-                white-space: pre-wrap;
-            }
-
-            #loading {
-                display: none;
-            }
-        </style>
-    </head>
-
-    <body>
-
-        <h1>RAG Assistant</h1>
-
-        <textarea
-            id="question"
-            placeholder="Ask a question..."
-        ></textarea>
-
-        <br>
-
-        <button onclick="askQuestion()">
-            Ask
-        </button>
-
-        <span id="loading">
-            Loading...
-        </span>
-
-        <div id="answer"></div>
-
-        <script>
-
-        async function askQuestion() {
-
-            const question =
-                document.getElementById("question").value.trim();
-
-            const answer =
-                document.getElementById("answer");
-
-            const loading =
-                document.getElementById("loading");
-
-            if (!question) {
-                answer.innerText =
-                    "Please enter a question.";
-                return;
-            }
-
-            answer.innerText = "";
-            loading.style.display = "inline";
-
-            try {
-
-                const response = await fetch(
-                    "/ask",
-                    {
-                        method: "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/json"
-                        },
-
-                        body: JSON.stringify({
-                            question: question
-                        })
-                    }
-                );
-
-                const data =
-                    await response.json();
-
-                if (!response.ok) {
-
-                    answer.innerText =
-                        data.error ||
-                        "Request failed.";
-
-                } else {
-
-                    answer.innerText =
-                        data.answer || "";
-                }
-
-            } catch (error) {
-
-                answer.innerText =
-                    "Unable to connect to the server.";
-
-            } finally {
-
-                loading.style.display = "none";
-            }
-        }
-
-        </script>
-
-    </body>
-    </html>
-    """
+    return render_template_string(
+        PAGE,
+        question=question,
+        answer=answer,
+        chunks=chunks,
+        error=error
+    )
 
 
-# ============================================================
-# Local development only
-# Render uses Gunicorn.
-# ============================================================
+@app.route("/health")
+def health():
+
+    return {
+        "status": "ok",
+        "model": MODEL,
+        "chunks": len(CHUNKS)
+    }
+
 
 if __name__ == "__main__":
 
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
+    )
+
     app.run(
         host="0.0.0.0",
-        port=int(
-            os.environ.get("PORT", 5000)
-        ),
-        debug=False
+        port=port
     )
